@@ -31,37 +31,31 @@ unsigned long dataMillis = 0;
 
 #define RXD2 16
 #define TXD2 17
-#define ONEWIREBUS 4
-#define BUZZERPIN 18
-#define BUZZERCHANNEL 0
+#define ONEWIREBUS 25
+#define BUZZERPIN 26
 
-// latitude gps
-double latitude = 0.0;
-// longitude gps
-double longitude = 0.0;
-// suhu alat
-double suhu = 0.0;
+struct Data
+{
+  double latitude;
+  double longitude;
+  double suhu;
+  double radius;
+};
 
-/* === Variabel untuk menampung nilai looping sebelumnya === */
-double prevLatitude = 0.0;
-double prevLongitude = 0.0;
-double prevSuhu = 0.0;
-/* ========================================================= */
-
-double latitudeRumah = 0.0;
-double longitudeRumah = 0.0;
-double radius = 0.0;
+// Data lokasi GPS
+Data data;
+// Data lokasi sebelumnya
+Data prevData;
+// Data lokasi pengaturan
+Data dataPengaturan;
 
 TinyGPSPlus gps;
 
 OneWire oneWire(ONEWIREBUS);
-
 DallasTemperature sensors(&oneWire);
 
 String notes[] = {"C4", "G3", "G3", "A3", "G3", "SILENCE", "B3", "C4"};
-
 MelodyPlayer player(BUZZERPIN, 0, LOW);
-
 Melody melody = MelodyFactory.load("Nice Melody", 175, notes, 8);
 
 void initWifi();
@@ -149,9 +143,9 @@ void initFirebase()
   Firebase.setStreamCallback(stream, streamPengaturanCallback, streamTimeoutCallback);
 }
 
-void streamPengaturanCallback(StreamData data)
+void streamPengaturanCallback(StreamData streamData)
 {
-  FirebaseJson *json = data.to<FirebaseJson *>();
+  FirebaseJson *json = streamData.to<FirebaseJson *>();
 
   size_t len = json->iteratorBegin();
   FirebaseJson::IteratorValue value;
@@ -164,24 +158,24 @@ void streamPengaturanCallback(StreamData data)
 
     if (value.key.equals("latitude"))
     {
-      latitudeRumah = value.value.toDouble();
-      Serial.printf("Latitude Rumah: %f \n", latitudeRumah);
+      dataPengaturan.latitude = value.value.toDouble();
+      Serial.printf("Latitude Rumah: %f \n", dataPengaturan.latitude);
 
-      if (latitude == 0.0)
-        latitude = latitudeRumah;
+      if (data.latitude == 0.0)
+        data.latitude = dataPengaturan.latitude;
     }
     else if (value.key.equals("longitude"))
     {
-      longitudeRumah = value.value.toDouble();
-      Serial.printf("longitude Rumah: %f \n", longitudeRumah);
+      dataPengaturan.longitude = value.value.toDouble();
+      Serial.printf("longitude Rumah: %f \n", dataPengaturan.longitude);
 
-      if (longitude == 0.0)
-        longitude = longitudeRumah;
+      if (data.longitude == 0.0)
+        data.longitude = dataPengaturan.longitude;
     }
     else if (value.key.equals("radius"))
     {
-      radius = value.value.toDouble();
-      Serial.printf("radius : %4.2f M \n", radius);
+      dataPengaturan.radius = value.value.toDouble();
+      Serial.printf("radius : %4.2f M \n", dataPengaturan.radius);
     }
   }
   Serial.println("----------------------------------");
@@ -202,28 +196,28 @@ void streamTimeoutCallback(bool timeout)
 void getSuhu()
 {
   sensors.requestTemperatures();
-  suhu = sensors.getTempCByIndex(0);
-  Serial.printf("Suhu : %4.2f C \n", suhu);
+  data.suhu = sensors.getTempCByIndex(0);
+  Serial.printf("Suhu : %4.2f C \n", data.suhu);
 }
 
 void getLokasi()
 {
   if (gps.location.isValid())
   {
-    latitude = (gps.location.lat());
-    longitude = (gps.location.lng());
+    data.latitude = gps.location.lat();
+    data.longitude = gps.location.lng();
   }
 
-  Serial.printf("Latitude : %f \n", latitude);
-  Serial.printf("Longitude : %f \n", longitude);
+  Serial.printf("Latitude : %f \n", data.latitude);
+  Serial.printf("Longitude : %f \n", data.longitude);
 
-  if (latitudeRumah != 0.0 || longitudeRumah != 0.0)
+  if (dataPengaturan.latitude != 0.0 || dataPengaturan.longitude != 0.0)
   {
-    double jarak = haversine(latitude, longitude, latitudeRumah, longitudeRumah);
+    double jarak = haversine(data.latitude, data.longitude, dataPengaturan.latitude, dataPengaturan.longitude);
     Serial.printf("Jarak : %4.2f M \n", jarak);
     Serial.println("----------------------------------");
 
-    if (jarak > radius)
+    if (jarak > dataPengaturan.radius)
     {
       sendNotification();
       player.play(melody);
@@ -240,21 +234,21 @@ void sendToFirebase()
     dataMillis = millis();
 
     // Jika nilai sebelumnya berbeda, maka data akan disimpan
-    if (prevLatitude != latitude || prevLongitude != longitude || prevSuhu != suhu)
+    if (prevData.latitude != data.latitude || prevData.longitude != data.longitude || prevData.suhu != data.suhu)
     {
       FirebaseJson json;
 
-      json.set("latitude", latitude);
-      json.set("longitude", longitude);
-      json.set("suhu", suhu);
+      json.set("latitude", data.latitude);
+      json.set("longitude", data.longitude);
+      json.set("suhu", data.suhu);
       json.set("waktu/.sv", "timestamp");
 
       Serial.printf("Simpan data ke firebase... %s\n", Firebase.setJSON(fbdo, "/data", json) ? "berhasil" : fbdo.errorReason().c_str());
       Serial.println("----------------------------------");
 
-      prevLatitude = latitude;
-      prevLongitude = longitude;
-      prevSuhu = suhu;
+      prevData.latitude = data.latitude;
+      prevData.longitude = data.longitude;
+      prevData.suhu = data.suhu;
     }
   }
 }
