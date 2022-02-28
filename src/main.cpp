@@ -22,6 +22,13 @@ const char *password = "leppangang1";
 #define FCM_SERVER_KEY "AAAAjvzAVEE:APA91bEWSEOGk-fOtfB2w7jU7CBt8cNL-9jc7wxURWKRNnGGVBFvwuQSNxR3gCINCOXzUTaxOFUAu_vtSnGX7-883FNxYNqTp0WuI9thThUmO0iYLlYRnm3qsSSBkla6nbEb832XZXTo"
 #define FCM_TOPIC "esp32"
 
+#define PESAN_KELUAR "Kucing anda keluar dari radius!"
+#define PESAN_SUHU_MIN "Suhu kucing anda terlalu dingin!"
+#define PESAN_SUHU_MAX "Suhu kucing anda terlalu panas!"
+
+#define SUHU_MIN 37
+#define SUHU_MAX 39
+
 FirebaseData fbdo;
 FirebaseData stream;
 FirebaseAuth auth;
@@ -63,7 +70,7 @@ void initFirebase();
 void getLokasi();
 void getSuhu();
 void sendToFirebase();
-void sendNotification();
+void sendNotification(const char *pesan);
 void streamPengaturanCallback(StreamData data);
 void streamTimeoutCallback(bool timeout);
 double haversine(double lat1, double lon1,
@@ -198,6 +205,11 @@ void getSuhu()
   sensors.requestTemperatures();
   data.suhu = sensors.getTempCByIndex(0);
   Serial.printf("Suhu : %4.2f C \n", data.suhu);
+
+  if (data.suhu < SUHU_MIN)
+    sendNotification(PESAN_SUHU_MIN);
+  else if (data.suhu > SUHU_MAX)
+    sendNotification(PESAN_SUHU_MAX);
 }
 
 void getLokasi()
@@ -219,7 +231,7 @@ void getLokasi()
 
     if (jarak > dataPengaturan.radius)
     {
-      sendNotification();
+      sendNotification(PESAN_KELUAR);
       player.play(melody);
     }
   }
@@ -253,9 +265,9 @@ void sendToFirebase()
   }
 }
 
-void sendNotification()
+void sendNotification(const char *pesan)
 {
-  fbdo.fcm.setNotifyMessage("Informasi", "Kucing anda keluar dari radius! ");
+  fbdo.fcm.setNotifyMessage("Informasi", pesan);
   Serial.println("Kirim notifikasi... ");
   Serial.printf("%s\n", Firebase.sendTopic(fbdo) ? "ok" : fbdo.errorReason().c_str());
   Serial.println("----------------------------------");
