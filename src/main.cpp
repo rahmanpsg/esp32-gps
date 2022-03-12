@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include <FirebaseESP32.h>
+#include <firebase.h>
+#include <Firebase_ESP_Client.h>
 #include <addons/TokenHelper.h>
 #include <addons/RTDBHelper.h>
 #include <TinyGPS++.h>
@@ -9,25 +10,12 @@
 #include <DallasTemperature.h>
 #include <melody_player.h>
 #include <melody_factory.h>
+#include <ezTime.h>
 
 const char *ssid = "HUAWEI nova 5T";
 const char *password = "leppangang1";
 
-#define API_KEY "AIzaSyCtaOal6QAq1P2-iiuo0zmLUM-Gg7zMDi4"
-#define DATABASE_URL "kucing1-72e99-default-rtdb.asia-southeast1.firebasedatabase.app/"
-
-#define USER_EMAIL "esp32@test.com"
-#define USER_PASSWORD "kucing"
-
-#define FCM_SERVER_KEY "AAAAjvzAVEE:APA91bEWSEOGk-fOtfB2w7jU7CBt8cNL-9jc7wxURWKRNnGGVBFvwuQSNxR3gCINCOXzUTaxOFUAu_vtSnGX7-883FNxYNqTp0WuI9thThUmO0iYLlYRnm3qsSSBkla6nbEb832XZXTo"
-#define FCM_TOPIC "esp32"
-
 #define PESAN_KELUAR "Kucing anda keluar dari radius!"
-#define PESAN_SUHU_MIN "Suhu kucing anda terlalu dingin!"
-#define PESAN_SUHU_MAX "Suhu kucing anda terlalu panas!"
-
-#define SUHU_MIN 37
-#define SUHU_MAX 39
 
 FirebaseData fbdo;
 FirebaseData stream;
@@ -45,6 +33,7 @@ struct Data
 {
   double latitude;
   double longitude;
+  double jarak;
   double suhu;
   double radius;
 };
@@ -65,13 +54,15 @@ String notes[] = {"C4", "G3", "G3", "A3", "G3", "SILENCE", "B3", "C4"};
 MelodyPlayer player(BUZZERPIN, 0, LOW);
 Melody melody = MelodyFactory.load("Nice Melody", 175, notes, 8);
 
+Timezone myTZ;
+
 void initWifi();
 void initFirebase();
 void getLokasi();
 void getSuhu();
 void sendToFirebase();
 void sendNotification(const char *pesan);
-void streamPengaturanCallback(StreamData data);
+void streamPengaturanCallback(FirebaseStream data);
 void streamTimeoutCallback(bool timeout);
 double haversine(double lat1, double lon1,
                  double lat2, double lon2);
@@ -84,6 +75,9 @@ void setup()
 
   initWifi();
   initFirebase();
+
+  waitForSync();
+  myTZ.setLocation(F("Asia/Makassar"));
 }
 
 void loop()
@@ -133,24 +127,23 @@ void initFirebase()
   auth.user.email = USER_EMAIL;
   auth.user.password = USER_PASSWORD;
 
+  config.service_account.data.client_email = FIREBASE_CLIENT_EMAIL;
+  config.service_account.data.project_id = FIREBASE_PROJECT_ID;
+  config.service_account.data.private_key = PRIVATE_KEY;
+
   Firebase.reconnectWiFi(true);
 
   config.token_status_callback = tokenStatusCallback;
 
   Firebase.begin(&config, &auth);
 
-  fbdo.fcm.begin(FCM_SERVER_KEY);
-  fbdo.fcm.setTopic(FCM_TOPIC);
-  fbdo.fcm.setPriority("high");
-  fbdo.fcm.setTimeToLive(1000);
-
-  if (!Firebase.beginStream(stream, "/pengaturan"))
+  if (!Firebase.RTDB.beginStream(&stream, "/pengaturan"))
     Serial.printf("sream begin error, %s\n\n", stream.errorReason().c_str());
 
-  Firebase.setStreamCallback(stream, streamPengaturanCallback, streamTimeoutCallback);
+  Firebase.RTDB.setStreamCallback(&stream, streamPengaturanCallback, streamTimeoutCallback);
 }
 
-void streamPengaturanCallback(StreamData streamData)
+void streamPengaturanCallback(FirebaseStream streamData)
 {
   FirebaseJson *json = streamData.to<FirebaseJson *>();
 
@@ -182,6 +175,7 @@ void streamPengaturanCallback(StreamData streamData)
     else if (value.key.equals("radius"))
     {
       dataPengaturan.radius = value.value.toDouble();
+      data.radius = value.value.toDouble();
       Serial.printf("radius : %4.2f M \n", dataPengaturan.radius);
     }
   }
@@ -205,11 +199,6 @@ void getSuhu()
   sensors.requestTemperatures();
   data.suhu = sensors.getTempCByIndex(0);
   Serial.printf("Suhu : %4.2f C \n", data.suhu);
-
-  if (data.suhu < SUHU_MIN)
-    sendNotification(PESAN_SUHU_MIN);
-  else if (data.suhu > SUHU_MAX)
-    sendNotification(PESAN_SUHU_MAX);
 }
 
 void getLokasi()
@@ -225,11 +214,11 @@ void getLokasi()
 
   if (dataPengaturan.latitude != 0.0 || dataPengaturan.longitude != 0.0)
   {
-    double jarak = haversine(data.latitude, data.longitude, dataPengaturan.latitude, dataPengaturan.longitude);
-    Serial.printf("Jarak : %4.2f M \n", jarak);
+    data.jarak = haversine(data.latitude, data.longitude, dataPengaturan.latitude, dataPengaturan.longitude);
+    Serial.printf("Jarak : %4.2f M \n", data.jarak);
     Serial.println("----------------------------------");
 
-    if (jarak > dataPengaturan.radius)
+    if (data.jarak > dataPengaturan.radius)
     {
       sendNotification(PESAN_KELUAR);
       player.play(melody);
@@ -245,17 +234,30 @@ void sendToFirebase()
   {
     dataMillis = millis();
 
-    // Jika nilai sebelumnya berbeda, maka data akan disimpan
+    if (data.latitude == 0 || data.longitude == 0)
+      return;
+
+    // Jika nilai sebelumnya berbeda, maka data akan disimpan ke firebase
     if (prevData.latitude != data.latitude || prevData.longitude != data.longitude || prevData.suhu != data.suhu)
     {
       FirebaseJson json;
 
-      json.set("latitude", data.latitude);
-      json.set("longitude", data.longitude);
-      json.set("suhu", data.suhu);
-      json.set("waktu/.sv", "timestamp");
+      json.set("fields/latitude/doubleValue", data.latitude);
+      json.set("fields/longitude/doubleValue", data.longitude);
+      json.set("fields/jarak/doubleValue", data.jarak);
+      json.set("fields/radius/doubleValue", data.radius);
+      json.set("fields/suhu/doubleValue", data.suhu);
+      json.set("fields/waktu/timestampValue", myTZ.dateTime(RFC3339));
 
-      Serial.printf("Simpan data ke firebase... %s\n", Firebase.setJSON(fbdo, "/data", json) ? "berhasil" : fbdo.errorReason().c_str());
+      String documentPath = "data";
+
+      Serial.printf("Simpan data ke firebase...");
+
+      if (Firebase.Firestore.createDocument(&fbdo, FIREBASE_PROJECT_ID, "", documentPath.c_str(), json.raw()))
+        Serial.printf("ok\n%s\n\n", fbdo.payload().c_str());
+      else
+        Serial.println(fbdo.errorReason());
+
       Serial.println("----------------------------------");
 
       prevData.latitude = data.latitude;
@@ -267,9 +269,14 @@ void sendToFirebase()
 
 void sendNotification(const char *pesan)
 {
-  fbdo.fcm.setNotifyMessage("Informasi", pesan);
+  FCM_HTTPv1_JSON_Message msg;
+
+  msg.topic = FCM_TOPIC;
+  msg.notification.title = "Informasi";
+  msg.notification.body = pesan;
+
   Serial.println("Kirim notifikasi... ");
-  Serial.printf("%s\n", Firebase.sendTopic(fbdo) ? "ok" : fbdo.errorReason().c_str());
+  Serial.printf("%s\n", Firebase.FCM.send(&fbdo, &msg) ? "ok" : fbdo.errorReason().c_str());
   Serial.println("----------------------------------");
 }
 
